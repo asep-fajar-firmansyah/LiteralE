@@ -782,3 +782,148 @@ class DistMultLiteral_gate_text(torch.nn.Module):
         pred = F.sigmoid(pred)
 
         return pred
+
+class ComplexLiteral_gate_text(torch.nn.Module):
+
+    def __init__(self, num_entities, num_relations, numerical_literals, text_literals):
+        super(ComplexLiteral_gate_text, self).__init__()
+
+        self.emb_dim = Config.embedding_dim
+
+        self.emb_e_real = torch.nn.Embedding(num_entities, self.emb_dim, padding_idx=0)
+        self.emb_e_img = torch.nn.Embedding(num_entities, self.emb_dim, padding_idx=0)
+        self.emb_rel_real = torch.nn.Embedding(num_relations, self.emb_dim, padding_idx=0)
+        self.emb_rel_img = torch.nn.Embedding(num_relations, self.emb_dim, padding_idx=0)
+
+        # Literal
+        # num_ent x n_num_lit
+        self.numerical_literals = Variable(torch.from_numpy(numerical_literals)).cuda()
+        self.n_num_lit = self.numerical_literals.size(1)
+
+        # Txt. Literal
+        # num_ent x n_txt_lit
+        self.text_literals = Variable(torch.from_numpy(text_literals)).cuda()
+        self.n_txt_lit = self.text_literals.size(1)
+
+        # LiteralE's g
+        self.emb_lit_real = GateMulti(self.emb_dim, self.n_num_lit, self.n_txt_lit)
+        self.emb_lit_img = GateMulti(self.emb_dim, self.n_num_lit, self.n_txt_lit)
+
+        # Dropout + loss
+        self.inp_drop = torch.nn.Dropout(Config.input_dropout)
+        self.loss = torch.nn.BCELoss()
+
+    def init(self):
+        xavier_normal_(self.emb_e_real.weight.data)
+        xavier_normal_(self.emb_e_img.weight.data)
+        xavier_normal_(self.emb_rel_real.weight.data)
+        xavier_normal_(self.emb_rel_img.weight.data)
+
+    def forward(self, e1, rel):
+        e1_emb_real = self.emb_e_real(e1).view(Config.batch_size, -1)
+        rel_emb_real = self.emb_rel_real(rel).view(Config.batch_size, -1)
+        e1_emb_img = self.emb_e_img(e1).view(Config.batch_size, -1)
+        rel_emb_img = self.emb_rel_img(rel).view(Config.batch_size, -1)
+
+        # Begin literals
+        # --------------
+        e1_num_lit = self.numerical_literals[e1.view(-1)]
+        e1_txt_lit = self.text_literals[e1.view(-1)]
+        e1_emb_real = self.emb_lit_real(e1_emb_real, e1_num_lit, e1_txt_lit)
+        e1_emb_img = self.emb_lit_img(e1_emb_img, e1_num_lit, e1_txt_lit)
+        
+        e2_multi_emb_real = self.emb_lit_real(self.emb_e_real.weight, self.numerical_literals, self.text_literals)
+        e2_multi_emb_img = self.emb_lit_img(self.emb_e_img.weight, self.numerical_literals, self.text_literals)
+        # --------------
+        # End literals
+
+        e1_emb_real = self.inp_drop(e1_emb_real)
+        rel_emb_real = self.inp_drop(rel_emb_real)
+        e1_emb_img = self.inp_drop(e1_emb_img)
+        rel_emb_img = self.inp_drop(rel_emb_img)
+
+        realrealreal = torch.mm(e1_emb_real*rel_emb_real, e2_multi_emb_real.t())
+        realimgimg = torch.mm(e1_emb_real*rel_emb_img, e2_multi_emb_img.t())
+        imgrealimg = torch.mm(e1_emb_img*rel_emb_real, e2_multi_emb_img.t())
+        imgimgreal = torch.mm(e1_emb_img*rel_emb_img, e2_multi_emb_real.t())
+
+        pred = realrealreal + realimgimg + imgrealimg - imgimgreal
+        pred = F.sigmoid(pred)
+
+        return pred
+
+class ConvELiteral_gate_text(torch.nn.Module):
+
+    def __init__(self, num_entities, num_relations, numerical_literals, text_literals):
+        super(ConvELiteral_gate_text, self).__init__()
+
+        self.emb_dim = Config.embedding_dim
+
+        self.emb_e = torch.nn.Embedding(num_entities, self.emb_dim, padding_idx=0)
+        self.emb_rel = torch.nn.Embedding(num_relations, self.emb_dim, padding_idx=0)
+
+        # Literal
+        # num_ent x n_num_lit
+        self.numerical_literals = Variable(torch.from_numpy(numerical_literals)).cuda()
+        self.n_num_lit = self.numerical_literals.size(1)
+
+        # Txt. Literal
+        # num_ent x n_txt_lit
+        self.text_literals = Variable(torch.from_numpy(text_literals)).cuda()
+        self.n_txt_lit = self.text_literals.size(1)
+
+        # LiteralE's g
+        self.emb_lit = GateMulti(self.emb_dim, self.n_num_lit, self.n_txt_lit)
+
+        self.inp_drop = torch.nn.Dropout(Config.input_dropout)
+        self.hidden_drop = torch.nn.Dropout(Config.dropout)
+        self.feature_map_drop = torch.nn.Dropout2d(Config.feature_map_dropout)
+        self.loss = torch.nn.BCELoss()
+
+        self.conv1 = torch.nn.Conv2d(1, 32, (3, 3), 1, 0, bias=Config.use_bias)
+        self.bn0 = torch.nn.BatchNorm2d(1)
+        self.bn1 = torch.nn.BatchNorm2d(32)
+        self.bn2 = torch.nn.BatchNorm1d(self.emb_dim)
+        self.register_parameter('b', Parameter(torch.zeros(num_entities)))
+        self.fc = torch.nn.Linear(10368, self.emb_dim)
+        print(num_entities, num_relations)
+
+    def init(self):
+        xavier_normal_(self.emb_e.weight.data)
+        xavier_normal_(self.emb_rel.weight.data)
+
+    def forward(self, e1, rel):
+        e1_emb = self.emb_e(e1).view(Config.batch_size, -1)
+        rel_emb = self.emb_rel(rel)
+
+        # Begin literals
+        # --------------
+        e1_num_lit = self.numerical_literals[e1.view(-1)]
+        e1_txt_lit = self.text_literals[e1.view(-1)]
+        e1_emb = self.emb_lit(e1_emb, e1_num_lit, e1_txt_lit)
+        e2_multi_emb = self.emb_lit(self.emb_e.weight, self.numerical_literals, self.text_literals)
+        # --------------
+        # End literals
+        
+        e1_emb = e1_emb.view(Config.batch_size, 1, 10, self.emb_dim//10)
+        rel_emb = rel_emb.view(Config.batch_size, 1, 10, self.emb_dim//10)
+
+        stacked_inputs = torch.cat([e1_emb, rel_emb], 2)
+
+        stacked_inputs = self.bn0(stacked_inputs)
+        x = self.inp_drop(stacked_inputs)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.feature_map_drop(x)
+        x = x.view(Config.batch_size, -1)
+        # print(x.size())
+        x = self.fc(x)
+        x = self.hidden_drop(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        x = torch.mm(x, e2_multi_emb.t())
+        x += self.b.expand_as(x)
+        pred = F.sigmoid(x)
+
+        return pred
