@@ -14,7 +14,7 @@ from tqdm import tqdm
 from typing import Tuple
 
 from evaluation import ranking_and_hits
-from model import DistMultLiteral, ComplexLiteral, ConvELiteral, DistMultLiteral_gate,ComplexLiteral_gate, ConvELiteral_gate, DistMultLiteral_gate_text, ComplexLiteral_gate_text
+from model import DistMultLiteral, ComplexLiteral, ConvELiteral, DistMultLiteral_gate,ComplexLiteral_gate, ConvELiteral_gate, DistMultLiteral_gate_text, ComplexLiteral_gate_text, ConvELiteral_gate_text
 
 from spodernet.preprocessing.pipeline import Pipeline, DatasetStreamer
 from spodernet.preprocessing.processors import JsonLoaderProcessors, Tokenizer, AddToVocab, SaveLengthsToState, StreamToHDF5, SaveMaxLengthsToState, CustomTokenizer
@@ -132,7 +132,9 @@ def create_constraints(triples: np.ndarray) -> Tuple[dict, dict, dict, dict]:
     return domain_constraints_per_rel, range_constraints_per_rel, domain_per_rel, range_per_rel
 
 def main():
-    apply_semantic_constraints = True
+    apply_semantic_constraints = False
+    confidence_score = 0.0
+    filtered_properties = False
     if Config.process: preprocess(Config.dataset, delete_data=False)
     input_keys = ['e1', 'rel', 'e2', 'e2_multi1', 'e2_multi2']
     p = Pipeline(Config.dataset, keys=input_keys)
@@ -159,6 +161,8 @@ def main():
         model = DistMultLiteral_gate_text(vocab['e1'].num_token, vocab['rel'].num_token, numerical_literals, text_literals)
     elif Config.model_name == 'ComplEx_text':
         model = ComplexLiteral_gate_text(vocab['e1'].num_token, vocab['rel'].num_token, numerical_literals, text_literals)
+    elif Config.model_name == 'ConvE_text':
+        model = ConvELiteral_gate_text(vocab['e1'].num_token, vocab['rel'].num_token, numerical_literals, text_literals)
     elif Config.model_name == 'DistMult_glin':
         model = DistMultLiteral(vocab['e1'].num_token, vocab['rel'].num_token, numerical_literals)
     elif Config.model_name == 'ComplEx_glin':
@@ -187,8 +191,9 @@ def main():
         print("relations number", vocab["rel"].num_token)
         ranks = []
         rel_list = []
-        for rel in vocab["rel"].token2idx:
-            rel_list.append(rel)
+        if filtered_properties==False:
+            for rel in vocab["rel"].token2idx:
+                rel_list.append(rel)
         e1_list = []
         for item in vocab["e1"].idx2token:
             e1_list.append(False)
@@ -196,9 +201,10 @@ def main():
         entities = list(set(df[2].values))
         for entity in tqdm(entities):
             entity_name = entity.split("/")[-1]
-            #df_rels = pd.read_csv(f'../KG-Abstractive-Summarization/data/ESBM/relevant-properties/{entity_name}', sep='\t', header=None, dtype=str)
-            #rel_list = list(set(df_rels[0].values))
-            #rel_list.append("http://purl.org/dc/terms/subject")
+            if filtered_properties==True:
+                df_rels = pd.read_csv(f'../../KG-Abstractive-Summarization/data/ESBM/relevant-properties/{entity_name}', sep='\t', header=None, dtype=str)
+                rel_list = list(set(df_rels[0].values))
+                rel_list.append("http://purl.org/dc/terms/subject")
             entity = entity.lower()
             try:
                 check_token = [vocab["e1"].token2idx[f"{entity}"]]
@@ -209,10 +215,10 @@ def main():
                 rel = rel.lower()
                 if rel=="oov" or rel=="":
                     continue
-                #try:
-                #    check_token = [vocab["rel"].token2idx[f"{rel}"]]
-                #except:
-                #    continue
+                try:
+                    check_token = [vocab["rel"].token2idx[f"{rel}"]]
+                except:
+                    continue
                 elist = e1_list.copy()
                 head = entity
                 relation = rel
@@ -256,7 +262,7 @@ def main():
                 pred_topk = output_top.squeeze(0).detach().numpy().tolist()
                 predicted_tail = vocab["e1"].idx2token[pred_topk[0]]
                 for num, score in enumerate(scores):
-                    if score > 0.9:
+                    if score > confidence_score:
                         predicted_tail = vocab["e1"].idx2token[pred_topk[num]]
                         triple = (head, relation, predicted_tail)
                         triples[triple]=score
